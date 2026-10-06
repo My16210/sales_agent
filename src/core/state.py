@@ -15,3 +15,5 @@ class SalesState(TypedDict):
     need_review: bool
     chart_path: str
     final_report: str
+    total_tokens:int
+    messages: list

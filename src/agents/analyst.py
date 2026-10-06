@@ -10,10 +10,18 @@ def analyst_node(state: SalesState) -> dict:
     # 1.初始化DeepSeek模型
     llm = ChatOpenAI(**settings.get_llm_kwargs("deepseek"))
 
-    #2。写prompt,告诉模型数据有哪些列、用户问什么
+    # 2. 拼接历史对话
+    history = ""
+    for msg in state.get("messages", []):
+        history += f"{msg['role']}: {msg['content']}\n"
+
+    #3。写prompt,告诉模型数据有哪些列、用户问什么
     prompt = f"""你是一个数据分析助手。
     这是一个销售数据表，列名有：{state['columns']}
     前5行数据：{state['data_sample']}
+
+    之前的对话：
+    {history}
 
     用户的问题是：{state['question']}
 
@@ -23,4 +31,10 @@ def analyst_node(state: SalesState) -> dict:
     # 3. 调模型
     response = llm.invoke(prompt)
     logger.info("DeepSeek生成代码成功")
-    return {"generated_code": response.content}
+
+    #4.统计token的消耗
+    tokens = response.usage_metadata.get("total_tokens", 0)
+    return {
+        "generated_code": response.content,
+        "total_tokens": state.get("total_tokens", 0) + tokens
+    }

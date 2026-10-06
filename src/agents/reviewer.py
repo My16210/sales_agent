@@ -2,9 +2,13 @@
 
 from config import settings
 from src.core.state import SalesState
+from src.utils.logger import setup_logger
+
+logger = setup_logger()
 
 
 def reviewer_node(state: SalesState) -> dict:
+    logger.info("Qwen开始审查代码")
     # 1.初始化Qwen模型
     llm = ChatOpenAI(**settings.get_llm_kwargs("qwen"))
 
@@ -29,9 +33,11 @@ def reviewer_node(state: SalesState) -> dict:
 
     # 3. 调模型
     response = llm.invoke(prompt)
+    tokens = response.usage_metadata.get("total_tokens", 0)
 
     # 4. 返回审查结果
     return {
         "review_result": response.content,
-        "review_comment": response.content
+        "review_comment": response.content,
+        "total_tokens": state.get("total_tokens", 0) + tokens
     }

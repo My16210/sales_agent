@@ -34,13 +34,18 @@ def report_writer_node(state: SalesState) -> dict:
     llm = ChatOpenAI(**settings.get_llm_kwargs("deepseek"))
     prompt = f"""用户问的是：{state['question']}
 数据分析结果是：{state['exec_result']}
+本次分析共消耗{state.get('total_tokens', 0)}个token。
 
-请把这个结果写成一段简洁的中文结论，不要超过3句话。
+请把这个结果写成一段简洁的中文结论，不要超过3句话，最后提一下本次token消耗。
 """
     response = llm.invoke(prompt)
 
-    # 3. 返回报告 + 图片路径
+    # 3. 返回报告 + 图片路径 + 更新对话历史
     return {
         "final_report": response.content,
-        "chart_path": str(chart_path)
+        "chart_path": str(chart_path),
+        "messages": state.get("messages", []) + [
+            {"role": "用户", "content": state["question"]},
+            {"role": "助手", "content": response.content}
+        ]
     }
