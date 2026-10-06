@@ -2,6 +2,9 @@
 
 from pathlib import Path
 from src.core.state import SalesState
+from src.utils.logger import setup_logger
+
+logger = setup_logger()
 
 
 def code_executor_node(state: SalesState) -> dict:
@@ -16,18 +19,16 @@ def code_executor_node(state: SalesState) -> dict:
     #3.准备执行环境
     local_vars = {"df":df}
 
-    print(f"\n--- 执行代码 ---\n{code}\n--- 执行结束 ---\n")
     try:
         #4.执行代码
         exec(code, {}, local_vars)
         #5.从local_vars里取result
         result = local_vars.get("result","没有返回结果")
-        print(f"--- 执行成功，结果: {result} ---")
+        logger.info(f"代码执行成功: {result}")
         return {
             "exec_result": str(result),
             "exec_error": None
         }
     except Exception as e:
-        print(f"--- 执行失败: {e} ---")
+        logger.error(f"代码执行失败: {e}")
         return{"exec_result":"","exec_error":str(e)}
-

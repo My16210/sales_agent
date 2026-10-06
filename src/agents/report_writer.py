@@ -30,7 +30,7 @@ def report_writer_node(state: SalesState) -> dict:
     plt.savefig(chart_path, dpi=100)
     plt.close()
 
-    # 2. 调DeepSeek写人话报告
+    # 2. 调DeepSeek写报告
     llm = ChatOpenAI(**settings.get_llm_kwargs("deepseek"))
     prompt = f"""用户问的是：{state['question']}
 数据分析结果是：{state['exec_result']}

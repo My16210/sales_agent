@@ -1,9 +1,12 @@
 ﻿from langchain_openai import ChatOpenAI
 from config.settings import settings
 from src.core.state import SalesState
+from src.utils.logger import setup_logger
+logger = setup_logger()
 
 
 def analyst_node(state: SalesState) -> dict:
+    logger.info(f"开始分析: {state['question']}")
     # 1.初始化DeepSeek模型
     llm = ChatOpenAI(**settings.get_llm_kwargs("deepseek"))
 
@@ -19,9 +22,5 @@ def analyst_node(state: SalesState) -> dict:
 
     # 3. 调模型
     response = llm.invoke(prompt)
-
-    # 4. 返回代码
-    print(f"\n--- DeepSeek写的代码 ---\n{response.content}\n--- 代码结束 ---\n")
+    logger.info("DeepSeek生成代码成功")
     return {"generated_code": response.content}
-
-

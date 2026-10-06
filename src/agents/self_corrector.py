@@ -1,9 +1,15 @@
 ﻿from langchain_openai import ChatOpenAI
 from config.settings import settings
 from src.core.state import SalesState
+from src.utils.logger import setup_logger
+
+logger = setup_logger()
 
 
 def self_corrector_node(state: SalesState) -> dict:
+    retry_count = state.get("retry_count", 0) + 1
+    logger.info(f"第{retry_count}次自动纠错")
+
     # 1. 初始化DeepSeek
     llm = ChatOpenAI(**settings.get_llm_kwargs("deepseek"))
 
@@ -24,6 +30,6 @@ def self_corrector_node(state: SalesState) -> dict:
     # 4. 返回新代码 + 重试次数+1 + 清除错误
     return {
         "generated_code": response.content,
-        "retry_count": state.get("retry_count", 0) + 1,
+        "retry_count": retry_count,
         "exec_error": None
     }
