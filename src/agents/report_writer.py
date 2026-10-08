@@ -1,51 +1,64 @@
-﻿import pandas as pd
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from pathlib import Path
 from langchain_openai import ChatOpenAI
+
 from config.settings import settings
 from src.core.state import SalesState
+from src.utils.logger import setup_logger
+from src.utils.tokens import extract_usage
+
+logger = setup_logger()
 
 
 def report_writer_node(state: SalesState) -> dict:
-    # 1. 画图：各地区销售额柱状图
-    csv_path = Path(__file__).parent.parent.parent / "data" / "raw" / "sales.csv"
-    df = pd.read_csv(csv_path)
-    region_sales = df.groupby("地区")["金额"].sum().sort_values(ascending=False)
+    exec_error = state.get("exec_error")
+    result = (state.get("exec_result") or "").strip()
 
-    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei"]
-    plt.rcParams["axes.unicode_minus"] = False
-    fig, ax = plt.subplots(figsize=(8, 5))
-    region_sales.plot(kind="bar", ax=ax, color="#4472C4")
-    ax.set_title("各地区销售额")
-    ax.set_xlabel("地区")
-    ax.set_ylabel("销售额（元）")
-    plt.xticks(rotation=0)
+    # 1. 执行失败 / 没有结果：给一份诚实的失败说明，不调 LLM 编结论
+    if exec_error or not result or result == "没有返回结果":
+        reason = exec_error or "代码没有产出结果"
+        report = (
+            f"分析未能完成：{reason}。"
+            f"已自动重试 {state.get('retry_count', 0)} 次。"
+            "可以换个问法，或确认问题里的维度和数据列是否对得上。"
+        )
+        logger.warning(f"生成失败报告：{reason}")
+        return {
+            "final_report": report,
+            "chart_generated": False,
+            "chart_path": "",
+            "messages": state.get("messages", []) + [
+                {"role": "用户", "content": state["question"]},
+                {"role": "助手", "content": report},
+            ],
+        }
 
-    output_dir = Path(__file__).parent.parent.parent / "data" / "output"
-    output_dir.mkdir(exist_ok=True)
-    chart_path = output_dir / "chart.png"
-    plt.tight_layout()
-    plt.savefig(chart_path, dpi=100)
-    plt.close()
-
-    # 2. 调DeepSeek写报告
+    # 2. 成功：让 DeepSeek 把结果写成一段人话结论
     llm = ChatOpenAI(**settings.get_llm_kwargs("deepseek"))
     prompt = f"""用户问的是：{state['question']}
-数据分析结果是：{state['exec_result']}
+数据分析结果是：{result}
 本次分析共消耗{state.get('total_tokens', 0)}个token。
 
 请把这个结果写成一段简洁的中文结论，不要超过3句话，最后提一下本次token消耗。
 """
     response = llm.invoke(prompt)
+    prompt_tokens, completion_tokens = extract_usage(response)
 
-    # 3. 返回报告 + 图片路径 + 更新对话历史
+    final_report = response.content
+
+    # 3. 审查没通过且额度已用尽：在报告里明确提示风险，不要假装没事
+    if state.get("need_review") and not state.get("review_passed"):
+        final_report += f"\n\n（提示：本次结果未通过 Qwen 审查，审查意见：{state.get('review_feedback', '')}）"
+
+    # 4. 图只有在本次真的画出来时才展示
+    chart_generated = bool(state.get("chart_generated"))
     return {
-        "final_report": response.content,
-        "chart_path": str(chart_path),
+        "final_report": final_report,
+        "chart_generated": chart_generated,
+        "chart_path": state.get("chart_path", "") if chart_generated else "",
+        "total_tokens": state.get("total_tokens", 0) + prompt_tokens + completion_tokens,
+        "deepseek_prompt_tokens": state.get("deepseek_prompt_tokens", 0) + prompt_tokens,
+        "deepseek_completion_tokens": state.get("deepseek_completion_tokens", 0) + completion_tokens,
         "messages": state.get("messages", []) + [
             {"role": "用户", "content": state["question"]},
-            {"role": "助手", "content": response.content}
-        ]
+            {"role": "助手", "content": final_report},
+        ],
     }

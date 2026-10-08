@@ -1,6 +1,7 @@
-﻿import pandas as pd
+import pandas as pd
 
-from pathlib import Path
+from config.settings import settings
+from src.core.sandbox import run_code
 from src.core.state import SalesState
 from src.utils.logger import setup_logger
 
@@ -8,27 +9,26 @@ logger = setup_logger()
 
 
 def code_executor_node(state: SalesState) -> dict:
-    #1.再次读取csv文件
-    csv_path = Path(__file__).parent.parent.parent / "data" / "raw" / "sales.csv"
-    df = pd.read_csv(csv_path)
+    # 1.读取数据（路径统一由 settings 管理）
+    df = pd.read_csv(settings.RAW_CSV_PATH)
 
-    #2.拿DeepSeek写的代码，清理markdown标记
-    code = state["generated_code"]
-    code = code.replace("```python", "").replace("```", "").strip()
+    # 2.交给沙箱：静态校验 + 受限 builtins 执行，不再裸 exec
+    out = run_code(
+        state["generated_code"],
+        df,
+        settings.OUTPUT_DIR,
+        settings.OUTPUT_DIR / "chart.png",
+    )
 
-    #3.准备执行环境
-    local_vars = {"df":df}
+    # 3.把结果映射回状态
+    if out["error"]:
+        logger.error(f"代码执行失败: {out['error']}")
+    else:
+        logger.info(f"代码执行成功: {out['result']} | 出图={out['chart_generated']}")
 
-    try:
-        #4.执行代码
-        exec(code, {}, local_vars)
-        #5.从local_vars里取result
-        result = local_vars.get("result","没有返回结果")
-        logger.info(f"代码执行成功: {result}")
-        return {
-            "exec_result": str(result),
-            "exec_error": None
-        }
-    except Exception as e:
-        logger.error(f"代码执行失败: {e}")
-        return{"exec_result":"","exec_error":str(e)}
+    return {
+        "exec_result": out["result"],
+        "exec_error": out["error"],
+        "chart_generated": out["chart_generated"],
+        "chart_path": out["chart_path"],
+    }

@@ -1,26 +1,62 @@
 """
 Agent测评脚本
-跑一组测试问题，统计：成功率、代码准确率、平均延迟、Token消耗、成本
+
+跑一组测试问题，输出两类指标：
+  健壮性：运行成功率 / 首次执行成功率 / 纠错有效率  —— 只说明「没崩溃」，不等于答对
+  正确性：答案准确率                                 —— 与 EXPECTED 真值比对，这才是该宣传的数字
+以及分模型的 token 消耗与成本（旧版把 Qwen 的 token 也按 DeepSeek 单价估算，是错的）。
 """
+import re
 import sys
 import time
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.core.graph import build_graph
+from src.core.state import make_initial_state
 
-# 测试问题集
-TEST_QUESTIONS = [
-    "哪个地区卖得最好？",
-    "销量最高的商品是什么？",
-    "哪个地区的退货率最高？",
-    "总销售额是多少？",
-    "iPhone15在哪个地区卖得最多？",
-]
+# 测试问题 + 真值（真值来自 data/raw/sales.csv，口径：销售额含退货订单）
+#   text   -> exec_result 里出现该字符串即算对
+#   number -> exec_result 里抽出的数字与该值相对误差在 tol 内即算对
+EXPECTED = {
+    "哪个地区卖得最好？": {"kind": "text", "value": "华东"},
+    "销量最高的商品是什么？": {"kind": "text", "value": "iPhone15"},
+    "哪个地区的退货率最高？": {"kind": "text", "value": "华中"},
+    "总销售额是多少？": {"kind": "number", "value": 1846604, "tol": 0.001},
+    "iPhone15在哪个地区卖得最多？": {"kind": "text", "value": "华东"},
+}
+TEST_QUESTIONS = list(EXPECTED.keys())
 
-# DeepSeek价格（每百万token）
-DEEPSEEK_INPUT_PRICE = 0.27  # 美元/百万token
-DEEPSEEK_OUTPUT_PRICE = 1.10
+# 单价（美元/百万 token），请按实际账单核对
+PRICES = {
+    "deepseek": {"input": 0.27, "output": 1.10},
+    # Qwen 单价请按 DashScope 实际价格填入；填 0 表示成本只统计 DeepSeek
+    "qwen": {"input": 0.0, "output": 0.0},
+}
+
+
+def judge(exec_result: str, report: str, spec: dict) -> bool:
+    """按真值判定这道题答对没有。主看 exec_result（报告是 LLM 转述，可能不出现确切数字）。"""
+    result_text = (exec_result or "").replace(",", "")
+
+    if spec["kind"] == "text":
+        return spec["value"] in result_text or spec["value"] in (report or "")
+
+    numbers = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", result_text)]
+    target = float(spec["value"])
+    tol = spec.get("tol", 0.001)
+    return any(abs(n - target) <= abs(target) * tol for n in numbers)
+
+
+def estimate_cost(tokens: dict) -> float:
+    """按模型分别计价。tokens 形如 {"deepseek_prompt": .., "deepseek_completion": .., ...}"""
+    total = 0.0
+    for provider in ("deepseek", "qwen"):
+        total += tokens.get(f"{provider}_prompt", 0) / 1_000_000 * PRICES[provider]["input"]
+        total += tokens.get(f"{provider}_completion", 0) / 1_000_000 * PRICES[provider]["output"]
+    return total
+
 
 def evaluate():
     app = build_graph()
@@ -34,73 +70,97 @@ def evaluate():
         print(f"\n[{i}/{len(TEST_QUESTIONS)}] 问题: {question}")
 
         start = time.time()
-        result = app.invoke({
-            "question": question,
-            "columns": [],
-            "data_sample": "",
-            "generated_code": "",
-            "exec_result": "",
-            "exec_error": None,
-            "retry_count": 0,
-            "review_result": "",
-            "review_comment": "",
-            "review_round": 0,
-            "need_review": True,
-            "chart_path": "",
-            "final_report": "",
-            "total_tokens": 0,
-            "messages": [],
-        })
+        result = app.invoke(make_initial_state(question))
         elapsed = time.time() - start
 
         report = result.get("final_report", "")
-        success = "没有结果" not in report and "无法判断" not in report
+        exec_result = result.get("exec_result", "")
         retries = result.get("retry_count", 0)
+        review_round = result.get("review_round", 0)
 
-        # 判断指标
-        first_try_success = (retries == 0)  # 第一次就跑通
-        correction_helped = (retries > 0 and success)  # 重试后成功
+        # 健壮性口径：没崩就算过（注意：不代表答案正确）
+        robust = "没有结果" not in report and "无法判断" not in report
+        # 正确性口径：和真值比对
+        correct = judge(exec_result, report, EXPECTED[question])
+
+        tokens = {
+            "deepseek_prompt": result.get("deepseek_prompt_tokens", 0),
+            "deepseek_completion": result.get("deepseek_completion_tokens", 0),
+            "qwen_prompt": result.get("qwen_prompt_tokens", 0),
+            "qwen_completion": result.get("qwen_completion_tokens", 0),
+        }
 
         results.append({
             "question": question,
-            "success": success,
-            "first_try": first_try_success,
-            "correction_helped": correction_helped,
+            "robust": robust,
+            "correct": correct,
+            "first_try": retries == 0,
+            "correction_helped": retries > 0 and robust,
+            "review_round": review_round,
             "elapsed": round(elapsed, 2),
             "tokens": result.get("total_tokens", 0),
+            "token_detail": tokens,
             "retries": retries,
             "report": report,
+            "exec_result": exec_result,
         })
 
-        status = "✅" if success else "❌"
-        print(f"  {status} | 耗时:{elapsed:.2f}s | Token:{result.get('total_tokens',0)} | 重试:{retries}次")
+        mark = "✅" if correct else "❌"
+        print(f"  {mark} 正确={correct} | 耗时:{elapsed:.2f}s | Token:{result.get('total_tokens', 0)} "
+              f"| 重试:{retries} | 审查轮次:{review_round}")
+        print(f"     结果: {exec_result[:80]}")
 
-    # 汇总
+    # ===== 汇总 =====
     print("\n" + "=" * 60)
     print("📊 测评结果汇总")
     print("=" * 60)
 
     total = len(results)
-    success_count = sum(1 for r in results if r["success"])
+    correct_count = sum(1 for r in results if r["correct"])
+    robust_count = sum(1 for r in results if r["robust"])
     first_try_count = sum(1 for r in results if r["first_try"])
     correction_count = sum(1 for r in results if r["correction_helped"])
     avg_time = sum(r["elapsed"] for r in results) / total
     avg_tokens = sum(r["tokens"] for r in results) / total
     avg_retries = sum(r["retries"] for r in results) / total
 
-    # 估算成本（假设输入输出各占一半）
-    avg_cost = (avg_tokens / 2 / 1_000_000 * DEEPSEEK_INPUT_PRICE +
-                avg_tokens / 2 / 1_000_000 * DEEPSEEK_OUTPUT_PRICE)
+    ds_prompt = sum(r["token_detail"]["deepseek_prompt"] for r in results)
+    ds_completion = sum(r["token_detail"]["deepseek_completion"] for r in results)
+    qw_prompt = sum(r["token_detail"]["qwen_prompt"] for r in results)
+    qw_completion = sum(r["token_detail"]["qwen_completion"] for r in results)
+
+    avg_cost = estimate_cost({
+        "deepseek_prompt": ds_prompt / total,
+        "deepseek_completion": ds_completion / total,
+        "qwen_prompt": qw_prompt / total,
+        "qwen_completion": qw_completion / total,
+    })
 
     print(f"总问题数:         {total}")
-    print(f"成功数:           {success_count}")
-    print(f"任务成功率:       {success_count/total*100:.1f}%")
+
+    print("\n--- 正确性指标（与真值比对，这才是该看的数字）---")
+    print(f"答案准确率:       {correct_count/total*100:.1f}% ({correct_count}/{total})")
+
+    print("\n--- 健壮性指标（只表示没崩溃，不等于答对）---")
+    print(f"运行成功率:       {robust_count/total*100:.1f}%")
     print(f"首次执行成功率:   {first_try_count/total*100:.1f}% (DeepSeek第一次写对)")
     print(f"纠错有效率:       {correction_count/total*100:.1f}% (报错后重试改成功)")
+
+    print("\n--- 性能与成本 ---")
     print(f"平均延迟:         {avg_time:.2f}s")
     print(f"平均Token消耗:    {avg_tokens:.0f}")
-    print(f"平均重试次数:      {avg_retries:.1f}")
-    print(f"单问题成本估算:    ${avg_cost:.4f} (约¥{avg_cost*7.2:.4f})")
+    print(f"平均重试次数:     {avg_retries:.1f}")
+    print(f"Token 明细:       DeepSeek in/out = {ds_prompt}/{ds_completion}, "
+          f"Qwen in/out = {qw_prompt}/{qw_completion}")
+    print(f"单问题成本估算:   ${avg_cost:.4f} (约¥{avg_cost*7.2:.4f})")
+    if PRICES["qwen"]["input"] == 0 and PRICES["qwen"]["output"] == 0:
+        print("                  注：Qwen 单价未配置，以上成本只计 DeepSeek")
+
+    print("\n--- 逐题明细 ---")
+    for r in results:
+        print(f"  {'✅' if r['correct'] else '❌'} {r['question']}  "
+              f"期望 vs 实得: {r['exec_result'][:60]}")
+
 
 if __name__ == "__main__":
     evaluate()

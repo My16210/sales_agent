@@ -49,6 +49,11 @@ class Settings:
     EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "")
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "")
 
+    # ===== 数据路径（集中管理，避免各节点硬编码） =====
+    DATA_DIR: Path = _ROOT / "data"
+    RAW_CSV_PATH: Path = DATA_DIR / "raw" / "sales.csv"
+    OUTPUT_DIR: Path = DATA_DIR / "output"
+
     # ===== MySQL（Text-SQL用，可选） =====
     MYSQL_HOST: str = os.getenv("MYSQL_HOST", "localhost")
     MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", "3306"))

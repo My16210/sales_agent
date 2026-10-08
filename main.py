@@ -1,12 +1,14 @@
-﻿import sys
+import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.core.graph import build_graph
+from src.core.state import make_initial_state
 
 if __name__ == "__main__":
     app = build_graph()
-    messages = []  # 存历史对话
+    messages = []  # 跨问题的历史对话
 
     while True:
         question = input("\n请输入你要分析的问题（输入q退出）: ")
@@ -14,24 +16,12 @@ if __name__ == "__main__":
             break
 
         print("=" * 60)
-        result = app.invoke({
-            "question": question,
-            "columns": [],
-            "data_sample": "",
-            "generated_code": "",
-            "exec_result": "",
-            "exec_error": None,
-            "retry_count": 0,
-            "review_result": "",
-            "review_comment": "",
-            "review_round": 0,
-            "need_review": True,
-            "chart_path": "",
-            "final_report": "",
-            "total_tokens": 0,
-            "messages": messages,
-        })
+        state = make_initial_state(question)
+        state["messages"] = messages  # 带上历史，让 Agent 记得上一轮问过什么
+        result = app.invoke(state)
 
         print("\n" + "=" * 60)
         print(result["final_report"] if result["final_report"] else "（报告还没写）")
+        if result.get("chart_generated") and result.get("chart_path"):
+            print(f"图表已保存到：{result['chart_path']}")
         messages = result.get("messages", [])  # 更新历史对话
